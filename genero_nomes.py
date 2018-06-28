@@ -118,7 +118,7 @@ class NameGroup:
         frequency_male = self.frequency_male
         total = float(frequency_female + frequency_male)
         freq = frequency_female if self.classification == 'F' else frequency_male
-        return freq / total
+        return (freq / total) if total > 0 else 0
 
     @property
     def name(self):
@@ -216,7 +216,8 @@ class NamesByGender:
             lzma.open(input_filename, mode='r'),
             encoding=encoding,
         )
-        for batch in ipartition(tqdm(csv.DictReader(fobj)), self.batch_size):
+        progress = tqdm(csv.DictReader(fobj))
+        for batch in ipartition(progress, self.batch_size):
             self._insert_names(
                 temptable,
                 [row['name'] for row in batch
@@ -242,10 +243,9 @@ class NamesByGender:
         cursor.execute(count_sql)
         return cursor.fetchall()[0][0]
 
-    def classify_names(self, workers=8):
+    def classify_names(self, workers=16):
         connection = self.connection
         tablename = self.tablename
-        #delete_sql = f'DELETE FROM {tablename} WHERE first_name = ?'
         query = f'''
             SELECT first_name
             FROM {tablename}
@@ -266,21 +266,18 @@ class NamesByGender:
         with Pool(processes=workers) as pool, tqdm() as progress:
             cursor = connection.cursor()
             remaining = self.count_not_classified()
-            total = 0
             batch_size = workers * 2
 
             while remaining:
                 cursor.execute(query)
                 header = [item[0] for item in cursor.description]
-                total += remaining
-                progress.total = total
+                progress.total = remaining
 
                 for batch in ipartition(cursor.fetchall(), batch_size):
                     names = [dict(zip(header, row))['first_name'] for row in batch]
                     results = pool.map(download_name_stats, names)
                     update_data = []
                     for name, result in zip(names, results):
-
                         update_data.append(serialize_row(name, result))
                     cursor.executemany(update_sql, update_data)
                     connection.commit()
@@ -288,7 +285,6 @@ class NamesByGender:
                     progress.update()
                 self.extract_alternatives()
                 remaining = self.count_not_classified()
-                total += remaining
 
     def _insert_names(self, tablename, names):
         cursor = self.connection.cursor()
@@ -321,16 +317,17 @@ class NamesByGender:
     def _export_csv(self, query, filename, encoding):
         cursor = self.connection.cursor()
         cursor.execute(query)
-        total = cursor.rowcount
         header = [item[0] for item in cursor.description]
 
-        with lzma.open(filename, mode='w') as binary_fobj:
-            fobj = io.TextIOWrapper(binary_fobj, encoding=encoding)
-            writer = csv.DictWriter(fobj, fieldnames=header)
-            writer.writeheader()
-            for batch in ipartition(tqdm(cursor.fetchall(), total=total),
-                                    self.batch_size):
+        binary_fobj = lzma.open(filename, mode='w')
+        fobj = io.TextIOWrapper(binary_fobj, encoding=encoding)
+        writer = csv.DictWriter(fobj, fieldnames=header)
+        writer.writeheader()
+        with tqdm() as progress:
+            for batch in ipartition(cursor.fetchall(), self.batch_size):
                 writer.writerows([dict(zip(header, row)) for row in batch])
+                progress.n += len(batch)
+                progress.refresh()
 
     def export_csv(self, output_names, output_groups, encoding='utf-8'):
         query = f'''
@@ -436,7 +433,7 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
     dataset_filename = 'data/input/documentos-brasil.csv.xz'
-    db_filename = 'data/output/genero-nomes.sqlite'
+    db_filename = 'data/input/temp.sqlite'
     output_names_filename = 'data/output/nomes.csv.xz'
     output_groups_filename = 'data/output/grupos.csv.xz'
     connection = sqlite3.Connection(db_filename)
