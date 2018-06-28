@@ -1,0 +1,5 @@
+click
+requests
+requests-cache
+git+https://github.com/turicas/rows.git@develop#egg=rows
+tqdm
